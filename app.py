@@ -9,14 +9,12 @@ Dependências:
 """
 
 import json
-import os
 import platform
 import subprocess
-import sys
 import threading
 import tkinter as tk
 from pathlib import Path
-from tkinter import filedialog, font, messagebox, ttk
+from tkinter import filedialog, messagebox, ttk
 
 import fitz
 import numpy as np
@@ -32,23 +30,22 @@ PRETRAINED  = "openai"
 DPI         = 150
 MAX_PAGINAS = 1
 BATCH_SIZE  = 16
-PREVIEW_W   = 200   # largura dos thumbnails de resultado
-PREVIEW_H   = 240   # altura dos thumbnails de resultado
+PREVIEW_W   = 200
+PREVIEW_H   = 200
 
-DARK        = "#0f0f10"
-PANEL       = "#1a1a1e"
-SURFACE     = "#222228"
-BORDER      = "#2e2e38"
-ACCENT      = "#4f7cff"
-ACCENT2     = "#7c4fff"
-TEXT        = "#e8e8f0"
-MUTED       = "#6b6b7e"
-SUCCESS     = "#3ecf8e"
-WARNING     = "#f5a623"
-ERROR       = "#f54e42"
+DARK    = "#0f0f10"
+PANEL   = "#1a1a1e"
+SURFACE = "#222228"
+BORDER  = "#2e2e38"
+ACCENT  = "#4f7cff"
+ACCENT2 = "#7c4fff"
+TEXT    = "#e8e8f0"
+MUTED   = "#6b6b7e"
+SUCCESS = "#3ecf8e"
+ERROR   = "#f54e42"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Lógica de ML (igual aos scripts originais)
+# Lógica ML
 # ─────────────────────────────────────────────────────────────────────────────
 
 def carregar_modelo():
@@ -106,97 +103,186 @@ def carregar_imagem_input(caminho: str):
 
 
 def gerar_thumbnail(pil_img, w=PREVIEW_W, h=PREVIEW_H):
-    """Gera thumbnail com aspect ratio preservado e fundo escuro."""
     img = pil_img.copy()
-    img.thumbnail((w, h - 40), Image.LANCZOS)
-    bg = Image.new("RGB", (w, h - 40), color=(30, 30, 38))
-    offset = ((w - img.width) // 2, (h - 40 - img.height) // 2)
+    img.thumbnail((w, h), Image.LANCZOS)
+    bg = Image.new("RGB", (w, h), color=(30, 30, 38))
+    offset = ((w - img.width) // 2, (h - img.height) // 2)
     bg.paste(img, offset)
     return bg
 
 
 def abrir_pasta_do_arquivo(caminho_arquivo: str):
-    """Abre o explorador de arquivos na pasta do arquivo, selecionando-o.
-    Reutiliza janela já aberta no Windows; no Mac/Linux abre o Finder/Nautilus."""
+    """Abre o explorador selecionando o arquivo.
+    No Windows, explorer /select reutiliza a janela já aberta se a pasta for a mesma."""
     path = Path(caminho_arquivo).resolve()
     sistema = platform.system()
     try:
         if sistema == "Windows":
-            # /select abre o Explorer e seleciona o arquivo; se já estiver aberto, foca
             subprocess.Popen(["explorer", "/select,", str(path)])
         elif sistema == "Darwin":
             subprocess.Popen(["open", "-R", str(path)])
         else:
-            # Linux — abre a pasta (Nautilus, Dolphin, etc.)
             subprocess.Popen(["xdg-open", str(path.parent)])
     except Exception as e:
         messagebox.showerror("Erro", f"Não foi possível abrir o explorador:\n{e}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Widgets customizados
+# Widgets
 # ─────────────────────────────────────────────────────────────────────────────
 
 class FlatButton(tk.Label):
-    """Botão flat estilizado (Label clicável)."""
-
     def __init__(self, parent, text, command=None, accent=False,
                  small=False, danger=False, **kwargs):
         bg = ACCENT if accent else (ERROR if danger else SURFACE)
         fg = "#ffffff" if (accent or danger) else TEXT
         pad_x = 12 if small else 18
         pad_y = 5 if small else 9
-
-        super().__init__(
-            parent, text=text, bg=bg, fg=fg,
-            cursor="hand2", padx=pad_x, pady=pad_y,
-            relief="flat", **kwargs
-        )
+        super().__init__(parent, text=text, bg=bg, fg=fg,
+                         cursor="hand2", padx=pad_x, pady=pad_y,
+                         relief="flat", **kwargs)
         self._bg_normal = bg
         self._bg_hover  = ACCENT2 if accent else (BORDER if not danger else "#c93c32")
-        self._command   = command
         self.bind("<Enter>",    lambda e: self.config(bg=self._bg_hover))
         self.bind("<Leave>",    lambda e: self.config(bg=self._bg_normal))
         self.bind("<Button-1>", lambda e: command() if command else None)
 
 
-class ScrollableFrame(tk.Frame):
-    """Frame com scrollbar vertical."""
+class CollapseSection(tk.Frame):
+    """Seção recolhível: clique no título abre/fecha o conteúdo."""
+
+    def __init__(self, parent, title, bg=PANEL, **kwargs):
+        super().__init__(parent, bg=bg, **kwargs)
+        self._open = False
+        self._bg   = bg
+
+        # Header clicável
+        hdr = tk.Frame(self, bg=bg, cursor="hand2")
+        hdr.pack(fill="x", padx=18, pady=(12, 0))
+
+        self._arrow = tk.Label(hdr, text="▶", bg=bg, fg=ACCENT,
+                               font=("Courier", 9), cursor="hand2")
+        self._arrow.pack(side="left", padx=(0, 6))
+        tk.Label(hdr, text=title, bg=bg, fg=ACCENT,
+                 font=("Courier", 9, "bold"), cursor="hand2").pack(side="left")
+
+        hdr.bind("<Button-1>", self._toggle)
+        self._arrow.bind("<Button-1>", self._toggle)
+
+        # Corpo (inicialmente oculto)
+        self.body = tk.Frame(self, bg=bg)
+        # não empacota ainda
+
+    def _toggle(self, _=None):
+        self._open = not self._open
+        if self._open:
+            self.body.pack(fill="x")
+            self._arrow.config(text="▼")
+        else:
+            self.body.forget()
+            self._arrow.config(text="▶")
+
+
+class ScrollableResults(tk.Frame):
+    """
+    Frame com Canvas + Scrollbar vertical.
+    O scroll funciona tanto com a barra lateral quanto com o scroll do mouse
+    (inclusive em subwidgets filhos).
+    """
 
     def __init__(self, parent, **kwargs):
-        outer = tk.Frame(parent, bg=DARK)
-        outer.pack(fill="both", expand=True)
+        super().__init__(parent, bg=DARK, **kwargs)
 
-        canvas_bg = kwargs.pop("bg", DARK)
-
-        self._canvas = tk.Canvas(outer, bg=canvas_bg, highlightthickness=0,
-                                 bd=0)
-        sb = tk.Scrollbar(outer, orient="vertical",
-                          command=self._canvas.yview,
-                          bg=SURFACE, troughcolor=DARK,
-                          activebackground=ACCENT)
+        self._canvas = tk.Canvas(self, bg=DARK, highlightthickness=0, bd=0)
+        sb = tk.Scrollbar(self, orient="vertical", command=self._canvas.yview,
+                          bg=SURFACE, troughcolor=DARK, activebackground=ACCENT)
         self._canvas.configure(yscrollcommand=sb.set)
+
         sb.pack(side="right", fill="y")
         self._canvas.pack(side="left", fill="both", expand=True)
-        super().__init__(self._canvas, bg=canvas_bg)
-        self._window = self._canvas.create_window((0, 0), window=self,
-                                                  anchor="nw")
-        self.bind("<Configure>", self._on_frame_configure)
-        self._canvas.bind("<Configure>", self._on_canvas_configure)
-        self._canvas.bind_all("<MouseWheel>", self._on_mousewheel)
 
-    def _on_frame_configure(self, _):
+        # Frame interno onde colocamos os cards
+        self.inner = tk.Frame(self._canvas, bg=DARK)
+        self._win  = self._canvas.create_window((0, 0), window=self.inner, anchor="nw")
+
+        self.inner.bind("<Configure>", self._update_scrollregion)
+        self._canvas.bind("<Configure>", self._update_inner_width)
+
+        # Bind scroll do mouse no canvas E em qualquer widget filho
+        self._canvas.bind("<MouseWheel>",     self._on_scroll)
+        self._canvas.bind("<Button-4>",       self._on_scroll)   # Linux scroll up
+        self._canvas.bind("<Button-5>",       self._on_scroll)   # Linux scroll down
+        self.bind_all("<MouseWheel>",         self._on_scroll)
+        self.bind_all("<Button-4>",           self._on_scroll)
+        self.bind_all("<Button-5>",           self._on_scroll)
+
+    def _update_scrollregion(self, _=None):
         self._canvas.configure(scrollregion=self._canvas.bbox("all"))
 
-    def _on_canvas_configure(self, event):
-        self._canvas.itemconfig(self._window, width=event.width)
+    def _update_inner_width(self, event):
+        self._canvas.itemconfig(self._win, width=event.width)
 
-    def _on_mousewheel(self, event):
-        self._canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+    def _on_scroll(self, event):
+        # Windows/Mac: event.delta  |  Linux: event.num
+        if event.num == 4 or (hasattr(event, "delta") and event.delta > 0):
+            self._canvas.yview_scroll(-1, "units")
+        elif event.num == 5 or (hasattr(event, "delta") and event.delta < 0):
+            self._canvas.yview_scroll(1, "units")
+
+    def scroll_to_top(self):
+        self._canvas.yview_moveto(0)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Aplicação principal
+# Lightbox (visualização em tela cheia)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class Lightbox(tk.Toplevel):
+    """Exibe uma imagem PIL ocupando quase toda a tela. Fecha com Esc ou clique."""
+
+    def __init__(self, parent, pil_img: Image.Image, titulo: str = ""):
+        super().__init__(parent)
+        self.configure(bg="#000000")
+        self.overrideredirect(True)   # sem barra de título do OS
+
+        sw = self.winfo_screenwidth()
+        sh = self.winfo_screenheight()
+        self.geometry(f"{sw}x{sh}+0+0")
+        self.lift()
+        self.focus_set()
+
+        # Escurece fundo
+        tk.Label(self, bg="#000000").place(relwidth=1, relheight=1)
+
+        # Redimensiona imagem para caber na tela (margem de 5%)
+        max_w = int(sw * 0.92)
+        max_h = int(sh * 0.92)
+        img = pil_img.copy()
+        img.thumbnail((max_w, max_h), Image.LANCZOS)
+        self._tk_img = ImageTk.PhotoImage(img)
+
+        # Imagem centralizada
+        lbl = tk.Label(self, image=self._tk_img, bg="#000000", cursor="hand2")
+        lbl.place(relx=0.5, rely=0.5, anchor="center")
+
+        # Nome do arquivo
+        if titulo:
+            tk.Label(self, text=titulo, bg="#000000", fg="#888888",
+                     font=("Courier", 9)).place(relx=0.5, rely=0.97, anchor="center")
+
+        # Botão fechar
+        tk.Label(self, text="✕  fechar", bg="#111111", fg="#888888",
+                 font=("Courier", 10), cursor="hand2", padx=10, pady=4
+                 ).place(relx=0.98, rely=0.02, anchor="ne")
+
+        # Fecha com qualquer clique ou Esc
+        self.bind("<Escape>",   lambda _: self.destroy())
+        self.bind("<Button-1>", lambda _: self.destroy())
+        lbl.bind("<Button-1>",  lambda _: self.destroy())
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Aplicação
 # ─────────────────────────────────────────────────────────────────────────────
 
 class App(tk.Tk):
@@ -205,42 +291,43 @@ class App(tk.Tk):
         super().__init__()
         self.title("DrawSearch — Busca de Desenhos Técnicos")
         self.configure(bg=DARK)
-        self.geometry("1100x780")
+        self.geometry("1150x800")
         self.minsize(900, 600)
 
-        # Estado
-        self.model        = None
-        self.preprocess   = None
-        self.device       = None
-        self.embeddings   = None   # np.ndarray (N, D)
-        self.metadados    = None   # list[dict]
-        self._model_lock  = threading.Lock()
-        self._thumb_cache = {}     # caminho → ImageTk
+        self.model       = None
+        self.preprocess  = None
+        self.device      = None
+        self.embeddings  = None
+        self.metadados   = None
+        self._model_lock = threading.Lock()
+        self._thumb_refs = {}   # caminho → PIL.Image (full res, para lightbox)
+        self._thumb_tk   = {}   # caminho → ImageTk (thumbnail)
 
-        # Variáveis de controle
-        self.var_pasta_pdfs  = tk.StringVar()
+        self.var_pasta_pdfs   = tk.StringVar()
         self.var_pasta_indice = tk.StringVar(value=str(Path.home() / "drawsearch_indice"))
         self.var_input        = tk.StringVar()
         self.var_top          = tk.IntVar(value=12)
-        self.var_status       = tk.StringVar(value="Pronto.")
+        self.var_status       = tk.StringVar(value="Carregando modelo de IA…")
         self.var_progresso    = tk.DoubleVar(value=0)
+
+        self._input_pil = None   # PIL da imagem de busca (para lightbox)
 
         self._build_ui()
         self._carregar_modelo_background()
 
-    # ── UI ──────────────────────────────────────────────────────────────────
+    # ── Construção da UI ────────────────────────────────────────────────────
 
     def _build_ui(self):
         self._build_header()
-        paned = tk.PanedWindow(self, orient="horizontal",
-                               bg=DARK, sashwidth=4, sashrelief="flat",
-                               sashpad=0)
-        paned.pack(fill="both", expand=True, padx=0, pady=0)
 
-        left = self._build_left_panel(paned)
+        paned = tk.PanedWindow(self, orient="horizontal",
+                               bg=DARK, sashwidth=5, sashrelief="flat")
+        paned.pack(fill="both", expand=True)
+
+        left  = self._build_left_panel(paned)
         right = self._build_right_panel(paned)
 
-        paned.add(left,  minsize=320, width=360)
+        paned.add(left,  minsize=300, width=350)
         paned.add(right, minsize=500)
 
         self._build_statusbar()
@@ -255,50 +342,115 @@ class App(tk.Tk):
         tk.Label(hdr, text="DrawSearch", bg=PANEL, fg=TEXT,
                  font=("Courier", 16, "bold")).pack(side="left", pady=8)
         tk.Label(hdr, text="  busca por similaridade visual em desenhos técnicos",
-                 bg=PANEL, fg=MUTED,
-                 font=("Courier", 9)).pack(side="left", pady=8)
+                 bg=PANEL, fg=MUTED, font=("Courier", 9)).pack(side="left", pady=8)
 
-        # Tag de dispositivo (CPU/GPU)
-        self.lbl_device = tk.Label(hdr, text="carregando…", bg=PANEL,
-                                   fg=MUTED, font=("Courier", 9))
-        self.lbl_device.pack(side="right", padx=18)
+        # Status do modelo — discreto, no canto direito
+        self.lbl_model_status = tk.Label(hdr, text="⏳ carregando modelo…",
+                                         bg=PANEL, fg=MUTED, font=("Courier", 8))
+        self.lbl_model_status.pack(side="right", padx=18)
 
     def _build_left_panel(self, parent):
-        frame = tk.Frame(parent, bg=PANEL, bd=0)
+        outer = tk.Frame(parent, bg=PANEL)
 
-        # ── Seção: Indexar ───────────────────────────────────────────────────
-        self._section(frame, "01  INDEXAR ACERVO")
+        # ── Seção de busca (sempre visível) ─────────────────────────────────
+        sec_busca = tk.Frame(outer, bg=PANEL)
+        sec_busca.pack(fill="x", padx=0, pady=(8, 0))
 
-        row_pasta = tk.Frame(frame, bg=PANEL)
-        row_pasta.pack(fill="x", padx=18, pady=(0, 4))
-        tk.Label(row_pasta, text="Pasta de PDFs", bg=PANEL, fg=MUTED,
+        tk.Frame(sec_busca, bg=PANEL).pack(fill="x", padx=18, pady=(8, 4))
+        tk.Label(sec_busca, text="BUSCAR", bg=PANEL, fg=ACCENT,
+                 font=("Courier", 9, "bold")).pack(anchor="w", padx=18)
+
+        row_inp = tk.Frame(sec_busca, bg=PANEL)
+        row_inp.pack(fill="x", padx=18, pady=(6, 2))
+        tk.Label(row_inp, text="Arquivo de busca  (PDF, JPG, PNG)",
+                 bg=PANEL, fg=MUTED, font=("Courier", 8)).pack(anchor="w")
+        row_e = tk.Frame(row_inp, bg=PANEL)
+        row_e.pack(fill="x")
+        self._entry_input = tk.Entry(row_e, textvariable=self.var_input,
+                                     bg=SURFACE, fg=TEXT, insertbackground=TEXT,
+                                     relief="flat", font=("Courier", 10), bd=0,
+                                     highlightthickness=1,
+                                     highlightbackground=BORDER,
+                                     highlightcolor=ACCENT)
+        self._entry_input.pack(side="left", fill="x", expand=True, ipady=6, padx=(0, 6))
+        FlatButton(row_e, "…", command=self._escolher_input, small=True).pack(side="left")
+
+        # Preview do input (clicável para lightbox)
+        self._frame_input_preview = tk.Frame(sec_busca, bg=PANEL)
+        self._frame_input_preview.pack(fill="x", padx=18, pady=(4, 0))
+        self._lbl_input_preview = tk.Label(self._frame_input_preview, bg=PANEL,
+                                           cursor="hand2", text="")
+        self._lbl_input_preview.pack(side="left")
+        self._lbl_input_preview.bind("<Button-1>", self._lightbox_input)
+
+        row_top = tk.Frame(sec_busca, bg=PANEL)
+        row_top.pack(fill="x", padx=18, pady=(8, 4))
+        tk.Label(row_top, text="Resultados a exibir", bg=PANEL, fg=MUTED,
                  font=("Courier", 8)).pack(anchor="w")
-        row_e1 = tk.Frame(row_pasta, bg=PANEL)
-        row_e1.pack(fill="x")
-        entry_pasta = tk.Entry(row_e1, textvariable=self.var_pasta_pdfs,
-                               bg=SURFACE, fg=TEXT, insertbackground=TEXT,
-                               relief="flat", font=("Courier", 10),
-                               bd=0, highlightthickness=1,
-                               highlightbackground=BORDER,
-                               highlightcolor=ACCENT)
-        entry_pasta.pack(side="left", fill="x", expand=True, ipady=6, padx=(0, 6))
-        FlatButton(row_e1, "…", command=self._escolher_pasta_pdfs,
-                   small=True).pack(side="left")
+        tk.Scale(row_top, variable=self.var_top, from_=3, to=30,
+                 orient="horizontal", bg=PANEL, fg=TEXT,
+                 troughcolor=SURFACE, activebackground=ACCENT,
+                 highlightthickness=0, sliderrelief="flat",
+                 bd=0, font=("Courier", 9)).pack(fill="x")
 
-        row_indice = tk.Frame(frame, bg=PANEL)
-        row_indice.pack(fill="x", padx=18, pady=(0, 10))
-        tk.Label(row_indice, text="Salvar índice em", bg=PANEL, fg=MUTED,
+        FlatButton(sec_busca, "⌕  Buscar Similares",
+                   command=self._iniciar_busca, accent=True).pack(
+                       fill="x", padx=18, pady=(6, 12))
+
+        tk.Frame(outer, bg=BORDER, height=1).pack(fill="x", padx=18, pady=2)
+
+        # ── Seção de índice (carregar) ───────────────────────────────────────
+        sec_indice = tk.Frame(outer, bg=PANEL)
+        sec_indice.pack(fill="x", padx=0, pady=0)
+
+        tk.Label(sec_indice, text="ÍNDICE ATUAL", bg=PANEL, fg=ACCENT,
+                 font=("Courier", 9, "bold")).pack(anchor="w", padx=18, pady=(12, 4))
+        self.lbl_indice_info = tk.Label(sec_indice,
+                                        text="Nenhum índice carregado.",
+                                        bg=PANEL, fg=MUTED,
+                                        font=("Courier", 9),
+                                        justify="left", wraplength=290)
+        self.lbl_indice_info.pack(anchor="w", padx=18, pady=(0, 6))
+        FlatButton(sec_indice, "Carregar Índice Existente",
+                   command=self._carregar_indice, small=True).pack(
+                       anchor="w", padx=18, pady=(0, 10))
+
+        tk.Frame(outer, bg=BORDER, height=1).pack(fill="x", padx=18, pady=2)
+
+        # ── Seção de indexação (recolhível) ──────────────────────────────────
+        col = CollapseSection(outer, "CONFIGURAÇÕES — Criar / Atualizar Índice", bg=PANEL)
+        col.pack(fill="x")
+
+        body = col.body
+
+        row_p = tk.Frame(body, bg=PANEL)
+        row_p.pack(fill="x", padx=18, pady=(8, 4))
+        tk.Label(row_p, text="Pasta raiz dos PDFs", bg=PANEL, fg=MUTED,
                  font=("Courier", 8)).pack(anchor="w")
-        row_e2 = tk.Frame(row_indice, bg=PANEL)
-        row_e2.pack(fill="x")
-        tk.Entry(row_e2, textvariable=self.var_pasta_indice,
+        row_ep = tk.Frame(row_p, bg=PANEL)
+        row_ep.pack(fill="x")
+        tk.Entry(row_ep, textvariable=self.var_pasta_pdfs,
                  bg=SURFACE, fg=TEXT, insertbackground=TEXT,
-                 relief="flat", font=("Courier", 10),
-                 bd=0, highlightthickness=1,
-                 highlightbackground=BORDER,
+                 relief="flat", font=("Courier", 10), bd=0,
+                 highlightthickness=1, highlightbackground=BORDER,
                  highlightcolor=ACCENT).pack(side="left", fill="x", expand=True,
                                              ipady=6, padx=(0, 6))
-        FlatButton(row_e2, "…", command=self._escolher_pasta_indice,
+        FlatButton(row_ep, "…", command=self._escolher_pasta_pdfs,
+                   small=True).pack(side="left")
+
+        row_i = tk.Frame(body, bg=PANEL)
+        row_i.pack(fill="x", padx=18, pady=(0, 6))
+        tk.Label(row_i, text="Salvar índice em", bg=PANEL, fg=MUTED,
+                 font=("Courier", 8)).pack(anchor="w")
+        row_ei = tk.Frame(row_i, bg=PANEL)
+        row_ei.pack(fill="x")
+        tk.Entry(row_ei, textvariable=self.var_pasta_indice,
+                 bg=SURFACE, fg=TEXT, insertbackground=TEXT,
+                 relief="flat", font=("Courier", 10), bd=0,
+                 highlightthickness=1, highlightbackground=BORDER,
+                 highlightcolor=ACCENT).pack(side="left", fill="x", expand=True,
+                                             ipady=6, padx=(0, 6))
+        FlatButton(row_ei, "…", command=self._escolher_pasta_indice,
                    small=True).pack(side="left")
 
         # Barra de progresso
@@ -308,94 +460,33 @@ class App(tk.Tk):
                         troughcolor=SURFACE, background=ACCENT,
                         darkcolor=ACCENT, lightcolor=ACCENT,
                         bordercolor=PANEL, thickness=4)
-        self.progressbar = ttk.Progressbar(frame, variable=self.var_progresso,
+        self.progressbar = ttk.Progressbar(body, variable=self.var_progresso,
                                            maximum=100, mode="determinate",
                                            style="DS.Horizontal.TProgressbar")
-        self.progressbar.pack(fill="x", padx=18, pady=(0, 8))
+        self.progressbar.pack(fill="x", padx=18, pady=(0, 6))
 
-        btn_row = tk.Frame(frame, bg=PANEL)
-        btn_row.pack(fill="x", padx=18, pady=(0, 16))
-        FlatButton(btn_row, "▶  Iniciar Indexação",
-                   command=self._iniciar_indexacao, accent=True).pack(fill="x")
+        FlatButton(body, "▶  Iniciar Indexação",
+                   command=self._iniciar_indexacao, accent=True).pack(
+                       fill="x", padx=18, pady=(0, 14))
 
-        tk.Frame(frame, bg=BORDER, height=1).pack(fill="x", padx=18, pady=4)
-
-        # ── Seção: Buscar ────────────────────────────────────────────────────
-        self._section(frame, "02  BUSCAR")
-
-        row_inp = tk.Frame(frame, bg=PANEL)
-        row_inp.pack(fill="x", padx=18, pady=(0, 4))
-        tk.Label(row_inp, text="Arquivo de busca  (PDF, JPG, PNG)",
-                 bg=PANEL, fg=MUTED, font=("Courier", 8)).pack(anchor="w")
-        row_e3 = tk.Frame(row_inp, bg=PANEL)
-        row_e3.pack(fill="x")
-        tk.Entry(row_e3, textvariable=self.var_input,
-                 bg=SURFACE, fg=TEXT, insertbackground=TEXT,
-                 relief="flat", font=("Courier", 10),
-                 bd=0, highlightthickness=1,
-                 highlightbackground=BORDER,
-                 highlightcolor=ACCENT).pack(side="left", fill="x", expand=True,
-                                             ipady=6, padx=(0, 6))
-        FlatButton(row_e3, "…", command=self._escolher_input,
-                   small=True).pack(side="left")
-
-        row_top = tk.Frame(frame, bg=PANEL)
-        row_top.pack(fill="x", padx=18, pady=(0, 10))
-        tk.Label(row_top, text="Resultados a exibir", bg=PANEL, fg=MUTED,
-                 font=("Courier", 8)).pack(anchor="w")
-        scale = tk.Scale(row_top, variable=self.var_top, from_=3, to=30,
-                         orient="horizontal", bg=PANEL, fg=TEXT,
-                         troughcolor=SURFACE, activebackground=ACCENT,
-                         highlightthickness=0, sliderrelief="flat",
-                         bd=0, font=("Courier", 9))
-        scale.pack(fill="x")
-
-        btn_row2 = tk.Frame(frame, bg=PANEL)
-        btn_row2.pack(fill="x", padx=18, pady=(0, 16))
-        FlatButton(btn_row2, "⌕  Buscar Similares",
-                   command=self._iniciar_busca, accent=True).pack(fill="x")
-
-        tk.Frame(frame, bg=BORDER, height=1).pack(fill="x", padx=18, pady=4)
-
-        # ── Seção: Índice carregado ──────────────────────────────────────────
-        self._section(frame, "03  ÍNDICE ATUAL")
-        self.lbl_indice_info = tk.Label(frame, text="Nenhum índice carregado.",
-                                        bg=PANEL, fg=MUTED,
-                                        font=("Courier", 9),
-                                        justify="left", wraplength=300)
-        self.lbl_indice_info.pack(padx=18, pady=(0, 8), anchor="w")
-        FlatButton(frame, "Carregar Índice Existente",
-                   command=self._carregar_indice, small=True).pack(padx=18, anchor="w")
-
-        return frame
+        return outer
 
     def _build_right_panel(self, parent):
         frame = tk.Frame(parent, bg=DARK)
 
-        # Cabeçalho dos resultados
         hdr = tk.Frame(frame, bg=DARK)
         hdr.pack(fill="x", padx=18, pady=(12, 6))
-        self.lbl_resultados = tk.Label(hdr, text="Resultados", bg=DARK,
-                                       fg=MUTED, font=("Courier", 11))
+        self.lbl_resultados = tk.Label(hdr, text="Resultados",
+                                       bg=DARK, fg=MUTED, font=("Courier", 11))
         self.lbl_resultados.pack(side="left")
 
-        # Preview do input
-        self.frame_preview_input = tk.Frame(hdr, bg=DARK)
-        self.frame_preview_input.pack(side="right")
-        self.lbl_input_thumb = tk.Label(self.frame_preview_input, bg=DARK)
-        self.lbl_input_thumb.pack(side="right")
-        tk.Label(self.frame_preview_input, text="busca: ", bg=DARK,
-                 fg=MUTED, font=("Courier", 8)).pack(side="right")
+        # ScrollableResults ocupa todo o espaço restante
+        self.results_area = ScrollableResults(frame)
+        self.results_area.pack(fill="both", expand=True)
 
-        # Área de resultados com scroll
-        self.scroll_frame = ScrollableFrame(frame, bg=DARK)
-        self.scroll_frame.pack(fill="both", expand=True)
-
-        # Placeholder
-        self.lbl_placeholder = tk.Label(self.scroll_frame,
-                                        text="Indexe um acervo e escolha um arquivo para buscar.",
-                                        bg=DARK, fg=MUTED, font=("Courier", 11))
-        self.lbl_placeholder.pack(pady=80)
+        tk.Label(self.results_area.inner,
+                 text="Carregue um índice e escolha um arquivo para buscar.",
+                 bg=DARK, fg=MUTED, font=("Courier", 11)).pack(pady=80)
 
         return frame
 
@@ -406,16 +497,10 @@ class App(tk.Tk):
         tk.Label(bar, textvariable=self.var_status, bg=SURFACE, fg=MUTED,
                  font=("Courier", 9), anchor="w").pack(side="left", padx=12)
 
-    def _section(self, parent, title):
-        f = tk.Frame(parent, bg=PANEL)
-        f.pack(fill="x", padx=18, pady=(16, 6))
-        tk.Label(f, text=title, bg=PANEL, fg=ACCENT,
-                 font=("Courier", 9, "bold")).pack(anchor="w")
-
-    # ── Seleção de arquivos/pastas ──────────────────────────────────────────
+    # ── File pickers ────────────────────────────────────────────────────────
 
     def _escolher_pasta_pdfs(self):
-        p = filedialog.askdirectory(title="Selecione a pasta com os PDFs")
+        p = filedialog.askdirectory(title="Selecione a pasta raiz com os PDFs")
         if p:
             self.var_pasta_pdfs.set(p)
 
@@ -431,23 +516,39 @@ class App(tk.Tk):
                         "*.pdf *.PDF *.jpg *.jpeg *.png *.PNG *.JPG *.JPEG")])
         if p:
             self.var_input.set(p)
-            self._mostrar_thumb_input(p)
+            self._carregar_preview_input(p)
 
-    def _mostrar_thumb_input(self, caminho):
-        try:
-            img = carregar_imagem_input(caminho)
-            img.thumbnail((60, 60), Image.LANCZOS)
-            tk_img = ImageTk.PhotoImage(img)
-            self.lbl_input_thumb.config(image=tk_img)
-            self.lbl_input_thumb._img = tk_img  # evita GC
-        except Exception:
-            pass
+    def _carregar_preview_input(self, caminho):
+        def _worker():
+            try:
+                img = carregar_imagem_input(caminho)
+                self._input_pil = img
+                thumb = img.copy()
+                thumb.thumbnail((80, 80), Image.LANCZOS)
+                tk_img = ImageTk.PhotoImage(thumb)
+                self.after(0, lambda: (
+                    self._lbl_input_preview.config(image=tk_img),
+                    setattr(self._lbl_input_preview, "_img", tk_img)
+                ))
+            except Exception:
+                pass
+        threading.Thread(target=_worker, daemon=True).start()
 
-    # ── Carregamento de modelo (background) ────────────────────────────────
+    # ── Lightbox ────────────────────────────────────────────────────────────
+
+    def _lightbox_input(self, _=None):
+        if self._input_pil:
+            Lightbox(self, self._input_pil,
+                     titulo=Path(self.var_input.get()).name)
+
+    def _lightbox_resultado(self, caminho):
+        if caminho in self._thumb_refs:
+            Lightbox(self, self._thumb_refs[caminho],
+                     titulo=Path(caminho).name)
+
+    # ── Modelo ──────────────────────────────────────────────────────────────
 
     def _carregar_modelo_background(self):
-        self.var_status.set("Carregando modelo CLIP… (pode demorar na primeira vez)")
-
         def _worker():
             try:
                 model, preprocess, device = carregar_modelo()
@@ -455,12 +556,13 @@ class App(tk.Tk):
                     self.model      = model
                     self.preprocess = preprocess
                     self.device     = device
-                self.after(0, lambda: self.lbl_device.config(
-                    text=f"✓ CLIP  |  {device.upper()}", fg=SUCCESS))
-                self.after(0, lambda: self.var_status.set("Modelo carregado. Pronto."))
+                label = "✓ Modelo de IA pronto"
+                self.after(0, lambda: (
+                    self.lbl_model_status.config(text=label, fg=SUCCESS),
+                    self.var_status.set("Pronto.")
+                ))
             except Exception as e:
                 self.after(0, lambda: self.var_status.set(f"Erro ao carregar modelo: {e}"))
-
         threading.Thread(target=_worker, daemon=True).start()
 
     # ── Indexação ───────────────────────────────────────────────────────────
@@ -468,7 +570,6 @@ class App(tk.Tk):
     def _iniciar_indexacao(self):
         pasta = self.var_pasta_pdfs.get().strip()
         saida  = self.var_pasta_indice.get().strip()
-
         if not pasta or not Path(pasta).is_dir():
             messagebox.showerror("Erro", "Selecione uma pasta de PDFs válida.")
             return
@@ -478,19 +579,18 @@ class App(tk.Tk):
         if self.model is None:
             messagebox.showwarning("Aguarde", "O modelo ainda está carregando.")
             return
-
         threading.Thread(target=self._indexar_worker,
                          args=(pasta, saida), daemon=True).start()
 
     def _indexar_worker(self, pasta_pdfs, pasta_saida):
-        self.after(0, lambda: self.var_status.set("Iniciando indexação…"))
-        self.after(0, lambda: self.var_progresso.set(0))
-
+        self.after(0, lambda: (self.var_status.set("Iniciando indexação…"),
+                               self.var_progresso.set(0)))
         Path(pasta_saida).mkdir(parents=True, exist_ok=True)
 
-        # rglob captura PDFs em qualquer subpasta
-        pdfs = sorted(Path(pasta_pdfs).rglob("*.pdf")) + \
-               sorted(Path(pasta_pdfs).rglob("*.PDF"))
+        pdfs = sorted(set(
+            list(Path(pasta_pdfs).rglob("*.pdf")) +
+            list(Path(pasta_pdfs).rglob("*.PDF"))
+        ))
 
         if not pdfs:
             self.after(0, lambda: messagebox.showwarning(
@@ -498,22 +598,20 @@ class App(tk.Tk):
             return
 
         total = len(pdfs)
-        todos_emb  = []
-        todos_meta = []
+        todos_emb, todos_meta = [], []
 
         for i, pdf_path in enumerate(pdfs):
             pct = int((i / total) * 100)
             nome = pdf_path.name
-            self.after(0, lambda p=pct, n=nome:
-                       (self.var_progresso.set(p),
-                        self.var_status.set(f"[{p}%]  {n}")))
-
+            self.after(0, lambda p=pct, n=nome: (
+                self.var_progresso.set(p),
+                self.var_status.set(f"[{p}%]  {n}")
+            ))
             paginas = pdf_para_imagens(pdf_path)
             if not paginas:
                 continue
-
             for inicio in range(0, len(paginas), BATCH_SIZE):
-                lote = paginas[inicio:inicio + BATCH_SIZE]
+                lote     = paginas[inicio:inicio + BATCH_SIZE]
                 idx_pags = [x[0] for x in lote]
                 imgs     = [x[1] for x in lote]
                 with self._model_lock:
@@ -528,8 +626,7 @@ class App(tk.Tk):
                     })
 
         if not todos_emb:
-            self.after(0, lambda: messagebox.showerror(
-                "Erro", "Nenhum embedding gerado."))
+            self.after(0, lambda: messagebox.showerror("Erro", "Nenhum embedding gerado."))
             return
 
         matriz = np.stack(todos_emb)
@@ -537,36 +634,33 @@ class App(tk.Tk):
         with open(Path(pasta_saida) / "metadados.json", "w", encoding="utf-8") as f:
             json.dump(todos_meta, f, ensure_ascii=False, indent=2)
 
-        # Carrega o índice recém-criado
         self.embeddings = matriz
         self.metadados  = todos_meta
-
         n = len(todos_meta)
         self.after(0, lambda: (
             self.var_progresso.set(100),
-            self.var_status.set(f"✓ Indexação concluída — {n} páginas indexadas."),
+            self.var_status.set(f"✓ Indexação concluída — {n} páginas."),
             self.lbl_indice_info.config(
-                text=f"{n} páginas indexadas\n{total} PDFs  |  {pasta_saida}",
-                fg=SUCCESS),
+                text=f"{n} páginas  |  {total} PDFs\n{pasta_saida}", fg=SUCCESS),
             messagebox.showinfo("Concluído",
                                 f"Indexação concluída!\n{n} páginas de {total} PDFs.")
         ))
 
-    # ── Carregamento de índice existente ────────────────────────────────────
+    # ── Carregar índice existente ────────────────────────────────────────────
 
     def _carregar_indice(self):
         pasta = filedialog.askdirectory(title="Selecione a pasta do índice")
         if not pasta:
             return
-        emb_path  = Path(pasta) / "embeddings.npy"
-        meta_path = Path(pasta) / "metadados.json"
-        if not emb_path.exists() or not meta_path.exists():
+        emb_p  = Path(pasta) / "embeddings.npy"
+        meta_p = Path(pasta) / "metadados.json"
+        if not emb_p.exists() or not meta_p.exists():
             messagebox.showerror("Erro",
                                  "Pasta inválida: não contém embeddings.npy e metadados.json")
             return
         try:
-            self.embeddings = np.load(str(emb_path))
-            with open(meta_path, "r", encoding="utf-8") as f:
+            self.embeddings = np.load(str(emb_p))
+            with open(meta_p, "r", encoding="utf-8") as f:
                 self.metadados = json.load(f)
             n = len(self.metadados)
             self.lbl_indice_info.config(
@@ -575,12 +669,13 @@ class App(tk.Tk):
         except Exception as e:
             messagebox.showerror("Erro", f"Falha ao carregar índice:\n{e}")
 
-    # ── Busca ───────────────────────────────────────────────────────────────
+    # ── Busca ────────────────────────────────────────────────────────────────
 
     def _iniciar_busca(self):
         if self.embeddings is None or self.metadados is None:
             messagebox.showwarning("Aviso",
-                                   "Nenhum índice carregado.\nIndexe um acervo ou carregue um índice existente.")
+                                   "Nenhum índice carregado.\n"
+                                   "Carregue um índice ou indexe um acervo primeiro.")
             return
         inp = self.var_input.get().strip()
         if not inp or not Path(inp).exists():
@@ -590,7 +685,6 @@ class App(tk.Tk):
         if self.model is None:
             messagebox.showwarning("Aguarde", "O modelo ainda está carregando.")
             return
-
         self.var_status.set("Buscando…")
         threading.Thread(target=self._busca_worker, args=(inp,), daemon=True).start()
 
@@ -601,10 +695,9 @@ class App(tk.Tk):
                 query = embedding_imagem_unica(
                     img, self.model, self.preprocess, self.device)
 
-            scores = (self.embeddings @ query.T).flatten()
+            scores  = (self.embeddings @ query.T).flatten()
             ranking = np.argsort(scores)[::-1]
 
-            # Deduplica por arquivo
             vistos = {}
             for idx in ranking:
                 arq = self.metadados[idx]["arquivo"]
@@ -615,15 +708,14 @@ class App(tk.Tk):
 
             resultados = [
                 {
-                    "rank": i + 1,
-                    "score": score,
-                    "arquivo": arq,
-                    "pagina": self.metadados[idx]["pagina"] + 1,
+                    "rank":             i + 1,
+                    "score":            score,
+                    "arquivo":          arq,
+                    "pagina":           self.metadados[idx]["pagina"] + 1,
                     "caminho_completo": self.metadados[idx]["caminho_completo"],
                 }
                 for i, (arq, (idx, score)) in enumerate(vistos.items())
             ]
-
             self.after(0, lambda: self._exibir_resultados(resultados))
         except Exception as e:
             self.after(0, lambda: (
@@ -631,24 +723,27 @@ class App(tk.Tk):
                 messagebox.showerror("Erro", f"Falha na busca:\n{e}")
             ))
 
-    # ── Exibição de resultados ──────────────────────────────────────────────
+    # ── Exibição de resultados ───────────────────────────────────────────────
 
     def _exibir_resultados(self, resultados):
-        # Limpa área anterior
-        for widget in self.scroll_frame.winfo_children():
-            widget.destroy()
-        self._thumb_cache.clear()
+        # Limpa tudo
+        for w in self.results_area.inner.winfo_children():
+            w.destroy()
+        self._thumb_refs.clear()
+        self._thumb_tk.clear()
 
         n = len(resultados)
         self.lbl_resultados.config(
             text=f"{n} resultado{'s' if n != 1 else ''} encontrado{'s' if n != 1 else ''}",
             fg=TEXT)
         self.var_status.set(f"Busca concluída — {n} resultado(s).")
+        self.results_area.scroll_to_top()
 
-        # Grade responsiva: 4 colunas fixas
         COLS = 4
-        grid = tk.Frame(self.scroll_frame, bg=DARK)
+        grid = tk.Frame(self.results_area.inner, bg=DARK)
         grid.pack(fill="both", expand=True, padx=12, pady=12)
+        for col in range(COLS):
+            grid.columnconfigure(col, weight=1)
 
         for r in resultados:
             col = (r["rank"] - 1) % COLS
@@ -656,34 +751,36 @@ class App(tk.Tk):
             self._criar_card(grid, r, row, col)
 
     def _criar_card(self, parent, resultado, row, col):
+        caminho = resultado["caminho_completo"]
+
         card = tk.Frame(parent, bg=SURFACE, bd=0,
                         highlightthickness=1, highlightbackground=BORDER)
         card.grid(row=row, column=col, padx=6, pady=6, sticky="nsew")
-        parent.columnconfigure(col, weight=1)
 
-        # Thumbnail
-        thumb_lbl = tk.Label(card, bg=SURFACE, cursor="hand2")
+        # Thumbnail clicável
+        thumb_lbl = tk.Label(card, bg=SURFACE, cursor="hand2",
+                             width=PREVIEW_W, height=PREVIEW_H)
         thumb_lbl.pack(fill="x")
-        self._carregar_thumbnail_async(resultado["caminho_completo"], thumb_lbl)
+        thumb_lbl.bind("<Button-1>",
+                       lambda _, c=caminho: self._lightbox_resultado(c))
+        self._carregar_thumbnail_async(caminho, thumb_lbl)
 
-        # Score bar
-        score = resultado["score"]
-        bar_frame = tk.Frame(card, bg=SURFACE)
-        bar_frame.pack(fill="x", padx=8, pady=(4, 0))
-        bar_w = PREVIEW_W - 16
+        # Barra de score
+        score   = resultado["score"]
+        bar_frm = tk.Frame(card, bg=SURFACE)
+        bar_frm.pack(fill="x", padx=8, pady=(4, 0))
+        bar_w  = PREVIEW_W - 16
         filled = max(4, int(score * bar_w))
-        tk.Frame(bar_frame, bg=ACCENT, width=filled, height=3).pack(side="left")
-        tk.Frame(bar_frame, bg=BORDER,
-                 width=bar_w - filled, height=3).pack(side="left")
+        tk.Frame(bar_frm, bg=ACCENT,  width=filled,          height=3).pack(side="left")
+        tk.Frame(bar_frm, bg=BORDER,  width=bar_w - filled,  height=3).pack(side="left")
 
         # Info
         info = tk.Frame(card, bg=SURFACE)
         info.pack(fill="x", padx=8, pady=(4, 2))
 
         nome = Path(resultado["arquivo"]).name
-        if len(nome) > 28:
-            nome = nome[:25] + "…"
-
+        if len(nome) > 26:
+            nome = nome[:23] + "…"
         tk.Label(info, text=nome, bg=SURFACE, fg=TEXT,
                  font=("Courier", 8, "bold"),
                  wraplength=PREVIEW_W - 16, justify="left",
@@ -691,53 +788,49 @@ class App(tk.Tk):
 
         subpasta = str(Path(resultado["arquivo"]).parent)
         if subpasta != ".":
-            tk.Label(info, text=subpasta, bg=SURFACE, fg=MUTED,
+            sp = subpasta if len(subpasta) <= 28 else "…" + subpasta[-25:]
+            tk.Label(info, text=sp, bg=SURFACE, fg=MUTED,
                      font=("Courier", 7),
-                     wraplength=PREVIEW_W - 16, justify="left",
-                     anchor="w").pack(anchor="w")
+                     wraplength=PREVIEW_W - 16, justify="left").pack(anchor="w")
 
-        tk.Label(info, text=f"similaridade: {score:.1%}",
-                 bg=SURFACE, fg=ACCENT,
+        tk.Label(info, text=f"similaridade: {score:.1%}", bg=SURFACE, fg=ACCENT,
                  font=("Courier", 8)).pack(anchor="w")
 
-        # Botão abrir
-        btn_frame = tk.Frame(card, bg=SURFACE)
-        btn_frame.pack(fill="x", padx=8, pady=(2, 8))
-        caminho = resultado["caminho_completo"]
-        FlatButton(btn_frame, "📂  Abrir no Explorer",
+        # Botão abrir no Explorer
+        btn_frm = tk.Frame(card, bg=SURFACE)
+        btn_frm.pack(fill="x", padx=8, pady=(2, 8))
+        FlatButton(btn_frm, "📂  Abrir no Explorer",
                    command=lambda c=caminho: abrir_pasta_do_arquivo(c),
                    small=True).pack(fill="x")
 
     def _carregar_thumbnail_async(self, caminho_pdf, label):
-        """Carrega o thumbnail em background para não travar a UI."""
-        if caminho_pdf in self._thumb_cache:
-            label.config(image=self._thumb_cache[caminho_pdf])
+        if caminho_pdf in self._thumb_tk:
+            label.config(image=self._thumb_tk[caminho_pdf])
             return
 
         def _worker():
             try:
-                paginas = pdf_para_imagens(Path(caminho_pdf), max_paginas=1, dpi=96)
+                paginas = pdf_para_imagens(Path(caminho_pdf), max_paginas=1, dpi=120)
                 if not paginas:
                     raise ValueError("sem páginas")
-                img = gerar_thumbnail(paginas[0][1], PREVIEW_W, PREVIEW_H)
-                tk_img = ImageTk.PhotoImage(img)
-                self._thumb_cache[caminho_pdf] = tk_img
+                full_img = paginas[0][1]
+                thumb    = gerar_thumbnail(full_img, PREVIEW_W, PREVIEW_H)
+                tk_img   = ImageTk.PhotoImage(thumb)
+                # Guarda full_img para lightbox
+                self._thumb_refs[caminho_pdf] = full_img
+                self._thumb_tk[caminho_pdf]   = tk_img
                 self.after(0, lambda lbl=label, im=tk_img:
-                           lbl.config(image=im, width=PREVIEW_W, height=PREVIEW_H - 40))
+                           lbl.config(image=im))
             except Exception:
-                # Placeholder cinza
-                placeholder = Image.new("RGB", (PREVIEW_W, PREVIEW_H - 40), (40, 40, 50))
+                placeholder = Image.new("RGB", (PREVIEW_W, PREVIEW_H), (40, 40, 50))
                 tk_img = ImageTk.PhotoImage(placeholder)
-                self._thumb_cache[caminho_pdf] = tk_img
+                self._thumb_tk[caminho_pdf] = tk_img
                 self.after(0, lambda lbl=label, im=tk_img: lbl.config(image=im))
 
         threading.Thread(target=_worker, daemon=True).start()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Entry point
-# ─────────────────────────────────────────────────────────────────────────────
-
 if __name__ == "__main__":
     app = App()
     app.mainloop()
